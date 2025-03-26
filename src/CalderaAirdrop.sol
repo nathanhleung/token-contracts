@@ -5,14 +5,15 @@ import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
-import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import {Ownable2StepUpgradeable} from "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+import {CalderaStaking} from "./CalderaStaking.sol";
 
-/// @title Airdrop Contract
+/// @title Caldera Airdrop Contract
 /// @notice This contract implements a token airdrop based on a Merkle tree for
 ///         efficient proof of inclusion. There are two types of claims:
 ///
@@ -37,7 +38,7 @@ import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 ///
 ///         The owner can be set to the zero address to disable upgrades and changes
 ///         to state variables.
-contract Airdrop is Initializable, UUPSUpgradeable, PausableUpgradeable, OwnableUpgradeable {
+contract CalderaAirdrop is Initializable, UUPSUpgradeable, PausableUpgradeable, Ownable2StepUpgradeable {
     using SafeERC20 for IERC20;
     using ECDSA for bytes32;
     using MessageHashUtils for bytes;
@@ -45,18 +46,22 @@ contract Airdrop is Initializable, UUPSUpgradeable, PausableUpgradeable, Ownable
     address public airdropVault;
     address public githubSigner;
     address public token;
+    address public staking;
+    uint256 public automaticStakingPercent;
     bytes32 public addressClaimMerkleRoot;
     string public addressClaimMessage;
     bytes32 public githubClaimMerkleRoot;
     uint256 public startTime;
     uint256 public endTime;
-    mapping(bytes32 => bool) public addressLeafClaimed;
-    mapping(bytes32 => bool) public githubLeafClaimed;
-    mapping(address => bool) public blocked;
+    mapping(bytes32 addressLeaf => bool isAddressLeafClaimed) public addressLeafClaimed;
+    mapping(bytes32 githubLeaf => bool isGithubLeafClaimed) public githubLeafClaimed;
+    mapping(address user => bool isBlocked) public blocked;
 
     event AirdropVaultSet(address airdropVault);
     event GithubSignerSet(address githubSigner);
     event TokenSet(address token);
+    event StakingSet(address staking);
+    event AutomaticStakingPercentSet(uint256 automaticStakingPercent);
     event AddressClaimMerkleRootSet(bytes32 addressClaimMerkleRoot);
     event AddressClaimMessageSet(string addressClaimMessage);
     event GithubClaimMerkleRootSet(bytes32 githubClaimMerkleRoot);
@@ -69,6 +74,8 @@ contract Airdrop is Initializable, UUPSUpgradeable, PausableUpgradeable, Ownable
     error InvalidAirdropVault();
     error InvalidGithubSigner();
     error InvalidToken();
+    error InvalidStaking();
+    error InvalidAutomaticStakingPercent();
     error InvalidClaimPeriod();
     error StartTimeTooLate();
     error EndTimeTooEarly();
@@ -80,6 +87,20 @@ contract Airdrop is Initializable, UUPSUpgradeable, PausableUpgradeable, Ownable
     error ClaimPeriodNotStarted();
     error ClaimPeriodEnded();
     error TermsNotAccepted();
+
+    struct InitializeParams {
+        address initialOwner;
+        address airdropVault;
+        address githubSigner;
+        address token;
+        address staking;
+        uint256 automaticStakingPercent;
+        bytes32 addressClaimMerkleRoot;
+        string addressClaimMessage;
+        bytes32 githubClaimMerkleRoot;
+        uint256 startTime;
+        uint256 endTime;
+    }
 
     /// @dev Modifier to require that the current block timestamp is within the claim period.
     modifier whenWithinClaimPeriod() {
@@ -114,68 +135,73 @@ contract Airdrop is Initializable, UUPSUpgradeable, PausableUpgradeable, Ownable
     }
 
     /// @notice Initializes the contract with necessary parameters.
-    /// @param initialOwner The initial owner of the contract.
-    /// @param airdropVault_ The address of the vault holding the tokens to be airdropped. The vault must
-    ///                      approve the airdrop contract as a spender in order for claims to work. A
-    ///                      Gnosis Safe is recommended.
-    /// @param githubSigner_ The address of the server-side signer verifying GitHub account
-    ///                      ownership.
-    /// @param token_ The token to be airdropped.
-    /// @param addressClaimMerkleRoot_ The root of the Merkle tree used for address claim verification.
-    /// @param addressClaimMessage_ The message to sign for address claim verification. This
-    ///                             message should include something to the effect of "this
-    ///                             user accepts the terms and conditions of the airdrop".
-    /// @param githubClaimMerkleRoot_ The root of the Merkle tree used for GitHub claim verification.
-    /// @param startTime_ The start time for the airdrop.
-    /// @param endTime_ The end time for the airdrop.
-    function initialize(
-        address initialOwner,
-        address airdropVault_,
-        address githubSigner_,
-        address token_,
-        bytes32 addressClaimMerkleRoot_,
-        string memory addressClaimMessage_,
-        bytes32 githubClaimMerkleRoot_,
-        uint256 startTime_,
-        uint256 endTime_
-    ) external initializer {
+    /// @param params The initialization parameters struct containing:
+    ///   - initialOwner: The initial owner of the contract
+    ///   - airdropVault: The address of the vault holding the tokens to be airdropped. The vault must
+    ///                   approve the airdrop contract as a spender in order for claims to work. A
+    ///                   Gnosis Safe is recommended.
+    ///   - githubSigner: The address of the server-side signer verifying GitHub account ownership
+    ///   - token: The token to be airdropped
+    ///   - staking: The address of a staking contract that has a `stakeFor` function
+    ///   - automaticStakingPercent: The percent of the airdropped tokens that should be automatically staked, where 1e18 is 100%
+    ///   - addressClaimMerkleRoot: The root of the Merkle tree used for address claim verification
+    ///   - addressClaimMessage: The message to sign for address claim verification. This should include
+    ///                         something to the effect of "this user accepts the terms and conditions of the airdrop"
+    ///   - githubClaimMerkleRoot: The root of the Merkle tree used for GitHub claim verification
+    ///   - startTime: The start time for the airdrop
+    ///   - endTime: The end time for the airdrop
+    function initialize(InitializeParams calldata params) external initializer {
         __UUPSUpgradeable_init();
         __Pausable_init();
-        __Ownable_init(initialOwner);
+        __Ownable_init(params.initialOwner);
 
-        if (airdropVault_ == address(0)) {
+        if (params.airdropVault == address(0)) {
             revert InvalidAirdropVault();
         }
 
-        if (githubSigner_ == address(0)) {
+        if (params.githubSigner == address(0)) {
             revert InvalidGithubSigner();
         }
 
-        if (token_ == address(0)) {
+        if (params.token == address(0)) {
             revert InvalidToken();
         }
 
-        if (startTime_ > endTime_) {
+        if (params.staking == address(0)) {
+            revert InvalidStaking();
+        }
+
+        if (params.automaticStakingPercent > 1e18) {
+            revert InvalidAutomaticStakingPercent();
+        }
+
+        if (params.startTime > params.endTime) {
             revert InvalidClaimPeriod();
         }
 
-        airdropVault = airdropVault_;
-        githubSigner = githubSigner_;
-        token = token_;
-        addressClaimMerkleRoot = addressClaimMerkleRoot_;
-        addressClaimMessage = addressClaimMessage_;
-        githubClaimMerkleRoot = githubClaimMerkleRoot_;
-        startTime = startTime_;
-        endTime = endTime_;
+        airdropVault = params.airdropVault;
+        githubSigner = params.githubSigner;
+        token = params.token;
+        staking = params.staking;
+        automaticStakingPercent = params.automaticStakingPercent;
+        addressClaimMerkleRoot = params.addressClaimMerkleRoot;
+        addressClaimMessage = params.addressClaimMessage;
+        githubClaimMerkleRoot = params.githubClaimMerkleRoot;
+        startTime = params.startTime;
+        endTime = params.endTime;
 
-        emit AirdropVaultSet(airdropVault_);
-        emit GithubSignerSet(githubSigner_);
-        emit TokenSet(token_);
-        emit AddressClaimMerkleRootSet(addressClaimMerkleRoot_);
-        emit AddressClaimMessageSet(addressClaimMessage_);
-        emit GithubClaimMerkleRootSet(githubClaimMerkleRoot_);
-        emit StartTimeSet(startTime_);
-        emit EndTimeSet(endTime_);
+        emit AirdropVaultSet(params.airdropVault);
+        emit GithubSignerSet(params.githubSigner);
+        emit TokenSet(params.token);
+        emit AddressClaimMerkleRootSet(params.addressClaimMerkleRoot);
+        emit AddressClaimMessageSet(params.addressClaimMessage);
+        emit GithubClaimMerkleRootSet(params.githubClaimMerkleRoot);
+        emit StartTimeSet(params.startTime);
+        emit EndTimeSet(params.endTime);
+
+        // Approve Staking contract to spend tokens from this contract,
+        // so we can stake automatically on behalf of users
+        IERC20(token).approve(params.staking, type(uint256).max);
     }
 
     /// @notice Pauses the contract, preventing claims.
@@ -226,7 +252,8 @@ contract Airdrop is Initializable, UUPSUpgradeable, PausableUpgradeable, Ownable
     /// @param accounts The array of addresses.
     /// @param status The blocklist status to set for the addresses.
     function updateBlocklist(address[] calldata accounts, bool status) external onlyOwner {
-        for (uint256 i; i < accounts.length; i++) {
+        uint256 accountsLength = accounts.length;
+        for (uint256 i; i < accountsLength; ++i) {
             blocked[accounts[i]] = status;
             emit AddressBlocklistUpdated(accounts[i], status);
         }
@@ -360,7 +387,14 @@ contract Airdrop is Initializable, UUPSUpgradeable, PausableUpgradeable, Ownable
 
         addressLeafClaimed[leaf] = true;
         emit AddressClaimed(sender, amount);
-        IERC20(token).safeTransferFrom(airdropVault, sender, amount);
+
+        // 1e18 is 100%, so we divide by 1e18 to normalize to 1
+        uint256 automaticStakingAmount = (amount * automaticStakingPercent) / 1e18;
+        if (automaticStakingAmount > 0) {
+            IERC20(token).safeTransferFrom(airdropVault, address(this), automaticStakingAmount);
+            CalderaStaking(staking).stakeFor(sender, automaticStakingAmount);
+        }
+        IERC20(token).safeTransferFrom(airdropVault, sender, amount - automaticStakingAmount);
     }
 
     /// @dev Internal function to handle GitHub claims.
@@ -381,7 +415,14 @@ contract Airdrop is Initializable, UUPSUpgradeable, PausableUpgradeable, Ownable
 
         githubLeafClaimed[leaf] = true;
         emit GithubClaimed(sender, githubUsername, amount);
-        IERC20(token).safeTransferFrom(airdropVault, sender, amount);
+
+        // 1e18 is 100%, so we divide by 1e18 to normalize to 1
+        uint256 automaticStakingAmount = (amount * automaticStakingPercent) / 1e18;
+        if (automaticStakingAmount > 0) {
+            IERC20(token).safeTransferFrom(airdropVault, address(this), automaticStakingAmount);
+            CalderaStaking(staking).stakeFor(sender, automaticStakingAmount);
+        }
+        IERC20(token).safeTransferFrom(airdropVault, sender, amount - automaticStakingAmount);
     }
 
     /// @notice Requires that the current block timestamp is within the claim period.

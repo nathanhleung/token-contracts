@@ -1,27 +1,48 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.26;
+pragma solidity =0.8.26;
 
 import {ERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
 import {ERC20PermitUpgradeable} from
     "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUpgradeable.sol";
 import {ERC20VotesUpgradeable} from
     "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20VotesUpgradeable.sol";
-import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import {Ownable2StepUpgradeable} from "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {NoncesUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/NoncesUpgradeable.sol";
 
-/// @title Rollup token contract
+/// @title Caldera Token Placeholder Contract
+/// @notice Minimal, placeholder contract with unchanging code which we can
+///         deploy to a deterministic address. This ensures deterministic
+///         constructor arguments to the `ERC1967Proxy` that we'll deploy the
+///         actual token contract behind, allowing us to mine a vanity address
+///         for the proxy solely by iterating over possible salts. Then, we
+///         can upgrade to the actual token contract later.
+contract CalderaTokenPlaceholder is Initializable, UUPSUpgradeable, Ownable2StepUpgradeable {
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize(address initialOwner) external initializer {
+        __UUPSUpgradeable_init();
+        __Ownable_init(initialOwner);
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override {}
+}
+
+/// @title Caldera Token Contract
 /// @notice Based on ENS: https://etherscan.io/token/0xc18360217d8f7ab5e7c516566761ea12ce7f9d72
 ///         The owner can be set to the zero address to disable upgrades, changes to state
 ///         variables, and minting.
-contract RollupToken is
+contract CalderaToken is
     Initializable,
     UUPSUpgradeable,
     ERC20Upgradeable,
     ERC20PermitUpgradeable,
     ERC20VotesUpgradeable,
-    OwnableUpgradeable
+    Ownable2StepUpgradeable
 {
     // Maximum supply; better to be a constant than configurable
     uint256 public constant MAX_SUPPLY = 10_000_000_000 ether;
@@ -43,36 +64,35 @@ contract RollupToken is
         _disableInitializers();
     }
 
-    /// @notice Constructs the token contract.
+    /// @notice Initializes the token contract. Should be called after upgrading from an initialized `CalderaTokenPlaceholder` contract.
     /// @dev Initializes the ERC20, ERC20Permit, and Ownable contracts, mints initial supply
     ///      to the airdrop vault, and sets the next minting time.
     /// @param tokenName The name of the token.
     /// @param tokenSymbol The symbol of the token.
-    /// @param initialOwner The initial owner of the contract.
     /// @param airdropVault The address of the vault holding the tokens to be airdropped. The vault must
     ///                      approve the airdrop contract as a spender in order for claims to work. A
     ///                      Gnosis Safe is recommended.
     /// @param airdropSupply The amount of tokens to mint initially for the airdrop.
-    function initialize(
+    /// @param lockedSupply The amount of tokens to issue to the tx sender (to be locked separately for backers, contributors, etc.)
+    function reinitialize(
         string memory tokenName,
         string memory tokenSymbol,
-        address initialOwner,
         address airdropVault,
-        uint256 airdropSupply
-    ) external initializer {
-        __UUPSUpgradeable_init();
+        uint256 airdropSupply,
+        uint256 lockedSupply
+    ) external reinitializer(2) {
         __ERC20_init(tokenName, tokenSymbol);
         __ERC20Permit_init(tokenName);
         __ERC20Votes_init();
-        __Ownable_init(initialOwner);
 
-        if (airdropSupply > MAX_SUPPLY) {
+        if (airdropSupply + lockedSupply > MAX_SUPPLY) {
             revert SupplyCapExceeded();
         }
 
         mintCapBips = INITIAL_MINT_CAP_BIPS;
         nextMint = block.timestamp + MINIMUM_MINT_INTERVAL;
         _mint(airdropVault, airdropSupply);
+        _mint(tx.origin, lockedSupply);
     }
 
     /// @notice Mints new tokens. Can only be executed once every `minimumMintInterval`, by the owner,
