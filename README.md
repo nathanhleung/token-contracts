@@ -1,3 +1,7 @@
-## Rollup Token Contracts
+# $ERA Contracts
 
-Caldera Foundation token contracts. See `Zellic_audit_report.pdf` for audit report.
+Caldera Foundation contracts.
+
+## Audits
+
+See the [`audits`](./audits) directory for audit reports.
